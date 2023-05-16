@@ -29,6 +29,7 @@ from .column_profile_compilers import (
     ColumnStatsProfileCompiler,
     UnstructuredCompiler,
 )
+from .count_min_sketch import CMS
 from .graph_profiler import GraphProfiler
 from .helpers.report_helpers import _prepare_report, calculate_quantiles
 from .profiler_options import (
@@ -1519,7 +1520,7 @@ class StructuredProfiler(BaseProfiler):
         # Structured specific properties
         self.row_has_null_count = 0
         self.row_is_null_count = 0
-        self.hashed_row_dict: dict = dict()
+        self.hashed_row_dict: CMS = CMS(1000, 5)
         self._profile: list[StructuredColProfiler] = []  # type: ignore[assignment]
         self._col_name_to_idx: dict[str | int, list[int]] = defaultdict(list)
         self.correlation_matrix: np.ndarray = None  # type: ignore[assignment]
@@ -1577,8 +1578,8 @@ class StructuredProfiler(BaseProfiler):
         merged_profile.row_is_null_count = (
             self.row_is_null_count + other.row_is_null_count
         )
-        merged_profile.hashed_row_dict.update(self.hashed_row_dict)
-        merged_profile.hashed_row_dict.update(other.hashed_row_dict)
+        merged_profile.hashed_row_dict = self.hashed_row_dict
+        self.hashed_row_dict.merge_cms(other.hashed_row_dict)
 
         self_to_other_idx = self._get_and_validate_schema_mapping(
             self._col_name_to_idx, other._col_name_to_idx
@@ -1882,7 +1883,7 @@ class StructuredProfiler(BaseProfiler):
     def _get_unique_row_ratio(self) -> float:
         """Return unique row ratio."""
         if self.total_samples:
-            return len(self.hashed_row_dict) / self.total_samples
+            return self.hashed_row_dict.num_unique_bins / self.total_samples
         return 0
 
     def _get_row_is_null_ratio(self) -> float:
@@ -1899,7 +1900,7 @@ class StructuredProfiler(BaseProfiler):
 
     def _get_duplicate_row_count(self) -> int:
         """Retun dup row count."""
-        return self.total_samples - len(self.hashed_row_dict)
+        return self.total_samples - self.hashed_row_dict.num_unique_bins
 
     @utils.method_timeit(name="row_stats")
     def _update_row_statistics(
@@ -1924,15 +1925,11 @@ class StructuredProfiler(BaseProfiler):
 
         self.total_samples += len(data)
         try:
-            self.hashed_row_dict.update(
-                dict.fromkeys(pd.util.hash_pandas_object(data, index=False), True)
-            )
+            for sample in data.to_records():
+                self.hashed_row_dict.add_cms(sample)
         except TypeError:
-            self.hashed_row_dict.update(
-                dict.fromkeys(
-                    pd.util.hash_pandas_object(data.astype(str), index=False), True
-                )
-            )
+            for sample in data.astype(str).to_records():
+                self.hashed_row_dict.add_cms(sample)
 
         # Calculate Null Column Count
         null_rows = set()
